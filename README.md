@@ -1,0 +1,89 @@
+# mylm
+
+A small GPT-style language model written from scratch in PyTorch: byte-level BPE tokenizer,
+decoder-only Transformer, training loop and text generation, with no dependencies beyond `torch`.
+
+The default configuration (873k parameters) trains on Tiny Shakespeare in under two minutes on an
+Apple Silicon GPU and produces text in the style of the plays.
+
+## Quick start
+
+Requires Python 3.10+.
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+
+mylm-prepare                              # download data, train tokenizer, write train/val splits
+mylm-train                                # train; prints loss as it goes, saves checkpoints/model.pt
+mylm-generate --prompt "ROMEO:"           # sample text from the trained model
+```
+
+`mylm-train` selects CUDA, Apple MPS or CPU automatically (override with `--device`). All options:
+`mylm-train --help`.
+
+## Results
+
+Default settings, 6000 steps, batch 32 x 128 tokens, Apple Silicon (MPS):
+
+| Step | Train loss | Validation loss |
+| ---: | ---------: | --------------: |
+|    0 |      6.263 |           6.259 |
+| 2000 |      2.819 |           3.149 |
+| 4000 |      2.575 |           2.986 |
+| 6000 |      2.507 |           2.904 |
+
+The starting loss equals `ln(512)`, i.e. uniform guessing over the vocabulary. Sample output:
+
+```
+ROMEO:
+Ay, help, away with her every gracious soul!
+
+MERCUTIO:
+Marry, sir, I say you, must stay, come.
+```
+
+The model learns the format of a play and plausible English phrasing. It does not produce
+coherent sentences; that is expected for under 1M parameters and 0.5M training tokens.
+
+## How it works
+
+```
+ data/input.txt ──► BPETokenizer ──► token IDs ──► get_batch ──► GPT ──► loss ──► AdamW
+   (raw text)       tokenizer.py     train.pt      data.py     model.py          train.py
+                                     val.pt
+```
+
+| Module | Responsibility |
+| --- | --- |
+| `mylm/tokenizer.py` | Byte-level BPE: `train`, `encode`, `decode`, `save`, `load` |
+| `mylm/prepare.py` | Downloads the dataset, trains the tokenizer, writes tokenized train/validation splits |
+| `mylm/data.py` | `get_batch`: random `(input, target)` windows where target is input shifted by one token |
+| `mylm/model.py` | `GPT`: token and position embeddings, Transformer blocks, output head, `generate` |
+| `mylm/train.py` | Training loop: AdamW, warmup and cosine learning rate, gradient clipping, evaluation |
+| `mylm/generate.py` | Loads a checkpoint and samples text (temperature, top-k) |
+
+See [docs/architecture.md](docs/architecture.md) for a walkthrough of each component.
+
+## Tests
+
+```bash
+pytest
+ruff check . && ruff format --check .
+```
+
+Tests cover tokenizer round trips (including non-ASCII text), batch construction, model shapes,
+the causal mask (changing a token never affects earlier positions), initial loss, the ability to
+overfit a single batch, and generation.
+
+## Data and references
+
+- Dataset: Tiny Shakespeare (about 1.1 MB), from Andrej Karpathy's
+  [char-rnn](https://github.com/karpathy/char-rnn) repository.
+- Vaswani et al., [Attention Is All You Need](https://arxiv.org/abs/1706.03762), 2017.
+- Radford et al., *Language Models are Unsupervised Multitask Learners* (GPT-2), 2019.
+- Sennrich et al., [Neural Machine Translation of Rare Words with Subword Units](https://arxiv.org/abs/1508.07909), 2016 (BPE).
+
+## License
+
+MIT. See [LICENSE](LICENSE).
