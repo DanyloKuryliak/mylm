@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mylm"
-version = "0.2.0"
+version = "0.3.0"
 description = "A small GPT-style language model with its own BPE tokenizer, built and trained from scratch in PyTorch."
 readme = "README.md"
 requires-python = ">=3.10"

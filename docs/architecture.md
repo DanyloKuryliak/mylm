@@ -87,6 +87,13 @@ gains for gated MLPs come from much larger models, so it may not transfer down.
 Dropout is applied to embeddings, attention weights and sub-layer outputs. Without it, the model
 overfits the small dataset: validation loss starts rising while training loss keeps falling.
 
+**How these options were compared.** Every variant was trained with the same data, tokenizer, step
+count, learning-rate schedule and seed, changing one thing at a time. Repeating the baseline and
+the RoPE run with a second seed moved the validation loss by about 0.01 (2.129 and 2.119; 2.072
+and 2.061), so differences below roughly 0.01 are noise. Only RoPE's improvement (about 0.06) is
+well outside that. The final base model therefore uses RoPE and leaves the other options at their
+defaults.
+
 ## 4. Training (`mylm/train.py`)
 
 - Loss: cross-entropy between predicted next-token distribution and the true next token.
@@ -113,12 +120,89 @@ When the text exceeds `block_size`, the model sees only the last `block_size` to
 token's position changes and the cache no longer matches. Those steps recompute the window, which
 keeps the output identical to the uncached path (checked in the tests) but gives no speed-up.
 
-## Default configuration
+`generate` also accepts a `stop` function that is called after every new token; chat uses it to end
+a story as soon as the end-of-text marker appears.
 
-| Setting | Value |
-| --- | --- |
-| Vocabulary | 512 |
-| Context length | 128 |
-| Width / layers / heads | 128 / 4 / 4 |
-| Parameters | 873,216 |
-| Dropout | 0.2 |
+## 6. Supervised fine-tuning (`mylm/instruct.py`, `mylm/sft.py`)
+
+A pretrained model only continues text. Fine-tuning on request and answer pairs teaches it to
+respond to a request instead.
+
+**Data.** TinyStories-Instruct has one entry per story with some of these fields: `Words` (words
+the story must use), `Features` (such as `Dialogue` or `BadEnding`), `Random sentence` (a sentence
+to include), `Summary` and the `Story` itself. The order of the fields varies and the summary often
+comes after the story, so `parse_records` splits on the field labels. Each entry becomes a request
+(its fields except the story) and an answer (the story).
+
+**Prompt format.** The fields are rendered in a fixed order:
+
+```
+### Instruction:
+Write a short story.
+Words: dog, ball
+Features: Dialogue
+Summary: A dog loses his ball and a girl helps him find it
+
+### Response:
+<story>
+<|endoftext|>
+```
+
+The tokenizer has no special tokens, so the end marker is ordinary text; generation stops when it
+appears in the output.
+
+**Loss mask.** Targets are the inputs shifted by one token, as in pretraining, but the targets of
+the prompt positions and of the padding are set to `-100`, which `cross_entropy` ignores. Only the
+story and the end marker contribute to the loss, so the model learns to answer requests and not to
+write them. Examples longer than the context window (about 6% of the entries) are dropped.
+
+**Training details.**
+- The last 500 entries are held out and never trained on; they provide the validation loss and the
+  requests used by the evaluation.
+- Each step accumulates gradients over micro-batches (`--micro-batch-size`), giving the same update
+  as one batch of `--batch-size` with a fraction of the activation memory.
+- Batch widths are rounded up to a multiple of 64, so the GPU sees only a few distinct tensor
+  shapes. A first run with full batches of arbitrary widths ran out of GPU memory on a machine
+  shared with other programs; micro-batches and bucketed widths together fixed it (the two
+  changes were not tested separately).
+- Dropout is switched back on (`--dropout`, default 0.1) because the base model is pretrained
+  without it and a few passes over the fine-tuning data would otherwise overfit.
+- The checkpoint with the best validation loss is the one that is saved.
+
+## 7. Evaluation (`mylm/evaluate.py`)
+
+`mylm-eval` generates a story for held-out requests that contain a `Words` field and reports:
+
+- **word coverage**: the average fraction of the requested words that appear in the story as whole
+  words (case-insensitive);
+- **all words used**: the share of stories that use every requested word;
+- **ended on its own**: the share of stories that wrote the end marker within the token limit;
+- **human story**: the word coverage of the dataset's own story, the best an answer can reasonably
+  score. It is about 0.9 and not 1.0 because authors often inflect a word ("blink" becomes
+  "blinked") and the check requires the exact word.
+
+The metric is cheap and checkable by code, but it measures one thing. A story can use every word and
+still be incoherent, and the share that ended on its own is not informative on its own: the
+pretrained model also ends its stories without having seen any request.
+
+## 8. Chat (`mylm/chat.py`)
+
+`mylm-chat` turns what is typed into a request. Plain text becomes the `Summary` field. Labelled
+fields can be typed on one line and separated with `|`, for example
+`Words: dog, ball | Features: Dialogue`. The request is rendered with the prompt format above, the
+model generates until it writes the end marker or reaches `--max-new-tokens`, and the story is
+printed. Each request is independent: the model keeps no conversation history.
+
+## Configurations
+
+| Setting | Defaults (`mylm-train`) | Base model used for fine-tuning |
+| --- | --- | --- |
+| Dataset | Tiny Shakespeare | `tinystories-large` (73M training tokens) |
+| Vocabulary | 512 | 4096 |
+| Context length | 128 | 512 |
+| Width / layers / heads | 128 / 4 / 4 | 384 / 8 / 6 |
+| Positions | learned | RoPE |
+| Parameters | 873,216 | 15,757,056 |
+| Dropout | 0.2 | 0.0 |
+| Batch x steps | 32 x 128 tokens, 6000 | 16 x 512 tokens, 10,000 |
+| Peak learning rate | 3e-3 | 1e-3 |
