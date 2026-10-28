@@ -159,3 +159,47 @@ def test_cached_generation_matches_uncached_even_past_block_size(pos):
         torch.manual_seed(1)
         outs.append(model.generate(prompt, 30, top_k=10, use_cache=use_cache))  # 33 > block_size 16
     assert torch.equal(outs[0], outs[1])
+
+
+def test_gqa_shrinks_the_kv_cache_and_the_qkv_projection():
+    gqa_cfg = GPTConfig(**{**CFG.to_dict(), "n_kv_heads": 1})  # 4 query heads share 1 KV head
+    gqa, mha = GPT(gqa_cfg).eval(), GPT(CFG).eval()
+    idx = torch.randint(0, CFG.vocab_size, (2, 9))
+    (_, past_gqa), (_, past_mha) = gqa.step(idx), mha.step(idx)
+    assert past_mha[0][0].shape == (2, 4, 9, 8)  # (batch, heads, tokens, head_dim)
+    assert past_gqa[0][0].shape == (2, 1, 9, 8)  # a quarter of the cache
+    head_dim = CFG.dim // CFG.n_heads
+    saved = CFG.n_layers * CFG.dim * 2 * (CFG.n_heads - 1) * head_dim  # K and V of 3 heads/layer
+    assert mha.num_parameters() - gqa.num_parameters() == saved
+
+
+def test_gqa_equals_multi_head_attention_with_duplicated_kv_heads():
+    torch.manual_seed(0)
+    hd = CFG.dim // CFG.n_heads
+    gqa_cfg = GPTConfig(**{**CFG.to_dict(), "n_kv_heads": 2, "n_layers": 1})
+    mha_cfg = GPTConfig(**{**CFG.to_dict(), "n_layers": 1})
+    gqa, mha = GPT(gqa_cfg).blocks[0].attn.eval(), GPT(mha_cfg).blocks[0].attn.eval()
+    # Build the multi-head layer so query head h uses a copy of KV head h // 2 (heads 0,1 / 2,3).
+    q_w, k_w, v_w = gqa.qkv.weight.split([CFG.dim, 2 * hd, 2 * hd])
+    with torch.no_grad():
+        dup = lambda w: w.view(2, hd, CFG.dim).repeat_interleave(2, dim=0).reshape(-1, CFG.dim)  # noqa: E731
+        mha.qkv.weight.copy_(torch.cat([q_w, dup(k_w), dup(v_w)]))
+        mha.proj.weight.copy_(gqa.proj.weight)
+    x = torch.randn(2, 7, CFG.dim)
+    assert torch.allclose(gqa(x)[0], mha(x)[0], atol=1e-5)
+
+
+@pytest.mark.parametrize("n_kv_heads", [1, 2])
+def test_gqa_cached_generation_matches_uncached(n_kv_heads):
+    model = GPT(GPTConfig(**{**CFG.to_dict(), "pos": "rope", "n_kv_heads": n_kv_heads})).eval()
+    prompt = torch.randint(0, CFG.vocab_size, (1, 3))
+    outs = []
+    for use_cache in (True, False):
+        torch.manual_seed(2)
+        outs.append(model.generate(prompt, 25, top_k=10, use_cache=use_cache))
+    assert torch.equal(outs[0], outs[1])
+
+
+def test_n_kv_heads_must_divide_n_heads():
+    with pytest.raises(AssertionError, match="divisible by n_kv_heads"):
+        GPT(GPTConfig(**{**CFG.to_dict(), "n_kv_heads": 3}))

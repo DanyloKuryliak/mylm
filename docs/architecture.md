@@ -67,6 +67,16 @@ disappears. Values are not rotated: position only affects where attention looks,
 passed along. On TinyStories with the 5.3M-parameter model RoPE reaches validation loss 2.072
 against 2.129, ahead at every evaluation, at about 6% more time per step.
 
+**Grouped-query attention.** By default every query head has its own key and value head. With
+`--kv-heads N` (N must divide `--heads`) there are still `--heads` query heads but only N key/value
+heads, and each group of `heads / N` query heads shares one: query head `h` reads key/value head
+`h // (heads / N)`. The KV cache stores only N heads, so it is `heads / N` times smaller (with 8
+heads: 1.5 MiB, 0.375 MiB and 0.19 MiB for 8, 2 and 1 KV heads over a 128-token context), and the
+key/value projections shrink too. On TinyStories with the 5.3M-parameter model, 2 KV heads reach
+validation loss 2.145 and 1 KV head 2.145, against 2.129 with 8: a small cost, partly because the
+model also has 11% fewer parameters. The benefit is for large models, where the cache dominates
+memory; at this size the cache is already tiny.
+
 **Feed-forward variants.** `--ff gelu` (default) is `down(gelu(up(x)))` with a 4x hidden width.
 `--ff swiglu` is `down(silu(gate(x)) * up(x))`: two parallel projections multiplied element-wise,
 so the gate path decides how much of each hidden feature passes. It has three matrices instead of

@@ -19,6 +19,11 @@ class GPTConfig:
     norm: str = "layernorm"  # "layernorm" or "rmsnorm"
     pos: str = "learned"  # "learned" position embeddings or "rope" (rotary)
     ff: str = "gelu"  # feed-forward type: "gelu" (plain MLP) or "swiglu" (gated)
+    n_kv_heads: int | None = None  # key/value heads shared by groups of query heads; None = n_heads
+
+    @property
+    def kv_heads(self):
+        return self.n_heads if self.n_kv_heads is None else self.n_kv_heads
 
     def to_dict(self):
         return asdict(self)
@@ -72,14 +77,22 @@ def make_norm(cfg):
 
 
 class CausalSelfAttention(nn.Module):
-    """Multi-head self-attention where each token only sees itself and earlier tokens."""
+    """Self-attention where each token only sees itself and earlier tokens.
+
+    There are `n_heads` query heads but only `n_kv_heads` key/value heads (grouped-query attention):
+    each group of n_heads / n_kv_heads query heads shares one key/value head. With
+    n_kv_heads == n_heads this is ordinary multi-head attention.
+    """
 
     def __init__(self, cfg):
         super().__init__()
         assert cfg.dim % cfg.n_heads == 0, "dim must be divisible by n_heads"
+        assert cfg.n_heads % cfg.kv_heads == 0, "n_heads must be divisible by n_kv_heads"
         self.n_heads = cfg.n_heads
+        self.n_kv_heads = cfg.kv_heads
         self.head_dim = cfg.dim // cfg.n_heads
-        self.qkv = nn.Linear(cfg.dim, 3 * cfg.dim, bias=False)  # queries, keys, values at once
+        qkv_width = (self.n_heads + 2 * self.n_kv_heads) * self.head_dim
+        self.qkv = nn.Linear(cfg.dim, qkv_width, bias=False)  # queries, keys, values at once
         self.proj = nn.Linear(cfg.dim, cfg.dim, bias=False)  # mixes the heads together
         self.attn_drop = nn.Dropout(cfg.dropout)
         self.resid_drop = nn.Dropout(cfg.dropout)
@@ -93,14 +106,21 @@ class CausalSelfAttention(nn.Module):
         Returns the attention output and the (keys, values) covering past + new tokens.
         """
         B, T, C = x.shape
-        q, k, v = self.qkv(x).split(C, dim=-1)
-        # (B, T, C) -> (B, heads, T, head_dim)
-        q, k, v = (t.view(B, T, self.n_heads, self.head_dim).transpose(1, 2) for t in (q, k, v))
+        kv_width = self.n_kv_heads * self.head_dim
+        q, k, v = self.qkv(x).split([C, kv_width, kv_width], dim=-1)
+        # (B, T, width) -> (B, heads, T, head_dim); keys and values have fewer heads than queries
+        q = q.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
+        k, v = (t.view(B, T, self.n_kv_heads, self.head_dim).transpose(1, 2) for t in (k, v))
         offset = 0 if past is None else past[0].shape[2]  # how many tokens came before
         if self.rotary is not None:  # position enters only here, through q and k (never v)
             q, k = self.rotary(q, offset), self.rotary(k, offset)
         if past is not None:  # keys and values of earlier tokens never change, so reuse them
             k, v = torch.cat([past[0], k], dim=2), torch.cat([past[1], v], dim=2)
+        present = (k, v)  # this is what gets cached: n_kv_heads heads, not n_heads
+
+        group = self.n_heads // self.n_kv_heads  # query heads per key/value head
+        if group > 1:  # query head h reads key/value head h // group
+            k, v = k.repeat_interleave(group, dim=1), v.repeat_interleave(group, dim=1)
 
         scores = q @ k.transpose(-2, -1) / math.sqrt(self.head_dim)  # (B, heads, T, offset + T)
         mask = self.mask[offset : offset + T, : offset + T]
@@ -108,7 +128,7 @@ class CausalSelfAttention(nn.Module):
         weights = self.attn_drop(F.softmax(scores, dim=-1))
 
         out = (weights @ v).transpose(1, 2).reshape(B, T, C)  # concatenate heads
-        return self.resid_drop(self.proj(out)), (k, v)
+        return self.resid_drop(self.proj(out)), present
 
 
 class FeedForward(nn.Module):
