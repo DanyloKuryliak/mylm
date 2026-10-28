@@ -18,6 +18,7 @@ class GPTConfig:
     dropout: float = 0.2  # fraction of activations randomly zeroed during training
     norm: str = "layernorm"  # "layernorm" or "rmsnorm"
     pos: str = "learned"  # "learned" position embeddings or "rope" (rotary)
+    ff: str = "gelu"  # feed-forward type: "gelu" (plain MLP) or "swiglu" (gated)
 
     def to_dict(self):
         return asdict(self)
@@ -115,6 +116,34 @@ class FeedForward(nn.Module):
         return self.drop(self.down(F.gelu(self.up(x))))
 
 
+class SwiGLU(nn.Module):
+    """Gated per-token MLP: down(silu(gate(x)) * up(x)).
+
+    Two parallel projections of the input are multiplied element-wise, so the gate path decides
+    how much of each hidden feature passes through. With three matrices instead of two, the hidden
+    width is about 8/3 * dim (not 4 * dim) to keep the parameter count close to the plain MLP.
+    """
+
+    def __init__(self, dim, dropout):
+        super().__init__()
+        hidden = round(8 * dim / 3 / 8) * 8  # multiple of 8 for efficient matrix shapes
+        self.gate = nn.Linear(dim, hidden, bias=False)
+        self.up = nn.Linear(dim, hidden, bias=False)
+        self.down = nn.Linear(hidden, dim, bias=False)
+        self.drop = nn.Dropout(dropout)
+
+    def forward(self, x):
+        return self.drop(self.down(F.silu(self.gate(x)) * self.up(x)))
+
+
+def make_ff(cfg):
+    if cfg.ff == "gelu":
+        return FeedForward(cfg.dim, cfg.dropout)
+    if cfg.ff == "swiglu":
+        return SwiGLU(cfg.dim, cfg.dropout)
+    raise ValueError(f"unknown ff {cfg.ff!r}, expected 'gelu' or 'swiglu'")
+
+
 class Block(nn.Module):
     """Transformer block: attention (tokens exchange information), then feed-forward."""
 
@@ -123,7 +152,7 @@ class Block(nn.Module):
         self.norm1 = make_norm(cfg)
         self.attn = CausalSelfAttention(cfg)
         self.norm2 = make_norm(cfg)
-        self.ff = FeedForward(cfg.dim, cfg.dropout)
+        self.ff = make_ff(cfg)
 
     def forward(self, x):
         x = x + self.attn(self.norm1(x))

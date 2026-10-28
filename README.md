@@ -68,6 +68,7 @@ coherent sentences; that is expected for under 1M parameters and 0.5M training t
 | TinyStories, `--dim 256 --layers 6` | 5.29M | ~6 min | **2.129** | 0.582 |
 | same, `--norm rmsnorm` | 5.29M | ~6.7 min | 2.131 | 0.582 |
 | same, `--pos rope` | 5.26M | ~6.5 min | **2.072** | 0.566 |
+| same, `--ff swiglu` | 5.27M | ~6.3 min | 2.152 | 0.588 |
 
 Loss is measured per token, and different tokenizers produce different numbers of characters per
 token (1.95 for Shakespeare, 3.66 for TinyStories), so per-token losses are only comparable when

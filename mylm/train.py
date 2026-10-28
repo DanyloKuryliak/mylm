@@ -53,6 +53,7 @@ def main():
     p.add_argument("--dropout", type=float, default=0.2)
     p.add_argument("--norm", choices=["layernorm", "rmsnorm"], default="layernorm")
     p.add_argument("--pos", choices=["learned", "rope"], default="learned")
+    p.add_argument("--ff", choices=["gelu", "swiglu"], default="gelu")
     p.add_argument("--lr", type=float, default=3e-3)
     p.add_argument("--warmup", type=int, default=100)
     p.add_argument("--eval-interval", type=int, default=500)
@@ -77,6 +78,7 @@ def main():
         dropout=args.dropout,
         norm=args.norm,
         pos=args.pos,
+        ff=args.ff,
     )
     model = GPT(cfg).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.1)

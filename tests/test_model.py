@@ -3,7 +3,7 @@ import math
 import pytest
 import torch
 
-from mylm.model import GPT, GPTConfig, RMSNorm, Rotary
+from mylm.model import GPT, GPTConfig, RMSNorm, Rotary, SwiGLU
 
 CFG = GPTConfig(vocab_size=64, block_size=16, dim=32, n_layers=2, n_heads=4, dropout=0.0)
 
@@ -111,3 +111,25 @@ def test_rope_model_drops_position_table_and_stays_causal():
 def test_unknown_pos_is_rejected():
     with pytest.raises(ValueError, match="unknown pos"):
         GPT(GPTConfig(**{**CFG.to_dict(), "pos": "sinusoidal"}))
+
+
+def test_swiglu_is_gated_by_the_up_projection():
+    torch.manual_seed(0)
+    ff = SwiGLU(dim=32, dropout=0.0)
+    x = torch.randn(2, 5, 32)
+    assert ff(x).shape == x.shape
+    with torch.no_grad():
+        ff.up.weight.zero_()  # the product with the gate path is zero, whatever the gate says
+    assert torch.count_nonzero(ff(x)) == 0
+
+
+def test_swiglu_keeps_parameter_count_close_to_plain_mlp():
+    cfg = GPTConfig(vocab_size=64, block_size=16, dim=256, n_layers=2, n_heads=4)
+    plain = GPT(cfg).num_parameters()
+    gated = GPT(GPTConfig(**{**cfg.to_dict(), "ff": "swiglu"})).num_parameters()
+    assert abs(gated - plain) / plain < 0.01
+
+
+def test_unknown_ff_is_rejected():
+    with pytest.raises(ValueError, match="unknown ff"):
+        GPT(GPTConfig(**{**CFG.to_dict(), "ff": "relu"}))

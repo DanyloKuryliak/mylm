@@ -67,6 +67,13 @@ disappears. Values are not rotated: position only affects where attention looks,
 passed along. On TinyStories with the 5.3M-parameter model RoPE reaches validation loss 2.072
 against 2.129, ahead at every evaluation, at about 6% more time per step.
 
+**Feed-forward variants.** `--ff gelu` (default) is `down(gelu(up(x)))` with a 4x hidden width.
+`--ff swiglu` is `down(silu(gate(x)) * up(x))`: two parallel projections multiplied element-wise,
+so the gate path decides how much of each hidden feature passes. It has three matrices instead of
+two, so the hidden width is about 8/3 of `dim` to keep the parameter count within 1%. At this
+scale (5.3M parameters, 6000 steps) it did not help: validation loss 2.152 against 2.129. Reported
+gains for gated MLPs come from much larger models, so it may not transfer down.
+
 Dropout is applied to embeddings, attention weights and sub-layer outputs. Without it, the model
 overfits the small dataset: validation loss starts rising while training loss keeps falling.
 
