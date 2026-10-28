@@ -37,8 +37,9 @@ tokenizer, per-token loss is directly comparable, which is how architecture chan
 
 Input of shape `(batch, time)` of token IDs becomes logits of shape `(batch, time, vocab)`.
 
-1. **Embeddings.** A token embedding maps each ID to a vector. A learned position embedding is
-   added, because attention alone has no notion of order.
+1. **Embeddings.** A token embedding maps each ID to a vector. By default a learned position
+   embedding is added, because attention alone has no notion of order (see *Positions* below for
+   the `--pos rope` alternative).
 2. **Transformer blocks** (repeated `n_layers` times), each with two residual sub-layers:
    - **Causal multi-head self-attention.** Each token forms a query, key and value. Attention
      weights are `softmax(q·kᵀ / √d)` with a lower-triangular mask so a token only attends to
@@ -55,6 +56,16 @@ root-mean-square, `x / sqrt(mean(x²) + ε) · γ`, with no mean subtraction and
 TinyStories with the 5.3M-parameter model both reach the same validation loss (2.129 vs 2.131,
 within seed noise), so the extra centering step is unnecessary. The RMSNorm here is written with
 plain tensor operations and ran about 10% slower than PyTorch's fused `nn.LayerNorm`.
+
+**Positions.** `--pos learned` (default) adds a trained vector per position, so the model must
+learn that position 57 is next to position 56 and has no vector for positions past `block_size`.
+`--pos rope` (rotary embeddings) instead rotates each query and key vector, viewed as
+`head_dim / 2` two-dimensional points, by an angle `position * theta_i`, where `theta_i` shrinks
+geometrically with the pair index. The dot product of a rotated query and key then depends only
+on the distance between the two tokens, so relative position is built in and the position table
+disappears. Values are not rotated: position only affects where attention looks, not what is
+passed along. On TinyStories with the 5.3M-parameter model RoPE reaches validation loss 2.072
+against 2.129, ahead at every evaluation, at about 6% more time per step.
 
 Dropout is applied to embeddings, attention weights and sub-layer outputs. Without it, the model
 overfits the small dataset: validation loss starts rising while training loss keeps falling.

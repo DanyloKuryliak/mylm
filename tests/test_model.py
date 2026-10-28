@@ -3,7 +3,7 @@ import math
 import pytest
 import torch
 
-from mylm.model import GPT, GPTConfig, RMSNorm
+from mylm.model import GPT, GPTConfig, RMSNorm, Rotary
 
 CFG = GPTConfig(vocab_size=64, block_size=16, dim=32, n_layers=2, n_heads=4, dropout=0.0)
 
@@ -78,3 +78,36 @@ def test_rmsnorm_model_has_fewer_parameters_and_trains_the_same_way():
 def test_unknown_norm_is_rejected():
     with pytest.raises(ValueError, match="unknown norm"):
         GPT(GPTConfig(**{**CFG.to_dict(), "norm": "batchnorm"}))
+
+
+def test_rope_preserves_vector_length():
+    x = torch.randn(2, 4, 16, 8)
+    assert torch.allclose(Rotary(8, 16)(x).norm(dim=-1), x.norm(dim=-1), atol=1e-5)
+
+
+def test_rope_scores_depend_only_on_relative_position():
+    torch.manual_seed(0)
+    rotary = Rotary(head_dim=8, block_size=16)
+    # The same q and k vector placed at every position, so only the rotation differs.
+    q = rotary(torch.randn(1, 1, 1, 8).expand(1, 1, 16, 8))
+    k = rotary(torch.randn(1, 1, 1, 8).expand(1, 1, 16, 8))
+    scores = (q @ k.transpose(-2, -1))[0, 0]
+    assert torch.allclose(scores[5, 2], scores[9, 6], atol=1e-5)  # both are 3 apart
+    assert torch.allclose(scores[3, 3], scores[11, 11], atol=1e-5)  # both are 0 apart
+    assert not torch.allclose(scores[5, 2], scores[5, 4], atol=1e-3)  # 3 apart vs 1 apart
+
+
+def test_rope_model_drops_position_table_and_stays_causal():
+    torch.manual_seed(0)
+    rope = GPT(GPTConfig(**{**CFG.to_dict(), "pos": "rope"})).eval()
+    assert rope.pos_emb is None
+    assert GPT(CFG).num_parameters() - rope.num_parameters() == CFG.block_size * CFG.dim
+    a = torch.randint(0, CFG.vocab_size, (1, 12))
+    b = a.clone()
+    b[0, -1] = (b[0, -1] + 1) % CFG.vocab_size
+    assert torch.allclose(rope(a)[0][:, :-1], rope(b)[0][:, :-1], atol=1e-5)
+
+
+def test_unknown_pos_is_rejected():
+    with pytest.raises(ValueError, match="unknown pos"):
+        GPT(GPTConfig(**{**CFG.to_dict(), "pos": "sinusoidal"}))

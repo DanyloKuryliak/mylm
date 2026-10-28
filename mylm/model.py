@@ -17,6 +17,7 @@ class GPTConfig:
     n_heads: int = 4
     dropout: float = 0.2  # fraction of activations randomly zeroed during training
     norm: str = "layernorm"  # "layernorm" or "rmsnorm"
+    pos: str = "learned"  # "learned" position embeddings or "rope" (rotary)
 
     def to_dict(self):
         return asdict(self)
@@ -35,6 +36,30 @@ class RMSNorm(nn.Module):
 
     def forward(self, x):
         return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps) * self.weight
+
+
+class Rotary(nn.Module):
+    """Rotary position embedding (RoPE): rotate query and key vectors by a position-dependent angle.
+
+    The vector is split into two halves that are treated as the x and y coordinates of
+    head_dim / 2 points. Point i is rotated by position * theta_i, with theta_i shrinking
+    geometrically, so low-index pairs spin fast (nearby positions) and high-index pairs spin slowly.
+    A dot product between a rotated query and key depends only on how far apart they are.
+    """
+
+    def __init__(self, head_dim, block_size, base=10000.0):
+        super().__init__()
+        assert head_dim % 2 == 0, "RoPE needs an even head size"
+        theta = base ** (-torch.arange(0, head_dim, 2).float() / head_dim)  # (head_dim/2,)
+        angles = torch.arange(block_size).float()[:, None] * theta[None, :]  # (T, head_dim/2)
+        self.register_buffer("cos", angles.cos(), persistent=False)
+        self.register_buffer("sin", angles.sin(), persistent=False)
+
+    def forward(self, x):
+        """x: (B, heads, T, head_dim) -> same shape, rotated."""
+        cos, sin = self.cos[: x.shape[-2]], self.sin[: x.shape[-2]]
+        x1, x2 = x.chunk(2, dim=-1)
+        return torch.cat([x1 * cos - x2 * sin, x1 * sin + x2 * cos], dim=-1)
 
 
 def make_norm(cfg):
@@ -57,6 +82,7 @@ class CausalSelfAttention(nn.Module):
         self.proj = nn.Linear(cfg.dim, cfg.dim, bias=False)  # mixes the heads together
         self.attn_drop = nn.Dropout(cfg.dropout)
         self.resid_drop = nn.Dropout(cfg.dropout)
+        self.rotary = Rotary(self.head_dim, cfg.block_size) if cfg.pos == "rope" else None
         mask = torch.tril(torch.ones(cfg.block_size, cfg.block_size, dtype=torch.bool))
         self.register_buffer("mask", mask, persistent=False)  # True where looking is allowed
 
@@ -65,6 +91,8 @@ class CausalSelfAttention(nn.Module):
         q, k, v = self.qkv(x).split(C, dim=-1)
         # (B, T, C) -> (B, heads, T, head_dim)
         q, k, v = (t.view(B, T, self.n_heads, self.head_dim).transpose(1, 2) for t in (q, k, v))
+        if self.rotary is not None:  # position enters only here, through q and k (never v)
+            q, k = self.rotary(q), self.rotary(k)
 
         scores = q @ k.transpose(-2, -1) / math.sqrt(self.head_dim)  # (B, heads, T, T)
         scores = scores.masked_fill(~self.mask[:T, :T], float("-inf"))  # hide the future
@@ -108,7 +136,10 @@ class GPT(nn.Module):
         super().__init__()
         self.cfg = cfg
         self.tok_emb = nn.Embedding(cfg.vocab_size, cfg.dim)  # token ID -> vector
-        self.pos_emb = nn.Embedding(cfg.block_size, cfg.dim)  # position -> vector
+        if cfg.pos not in ("learned", "rope"):
+            raise ValueError(f"unknown pos {cfg.pos!r}, expected 'learned' or 'rope'")
+        # position -> vector; RoPE has no such table because it rotates q and k instead
+        self.pos_emb = nn.Embedding(cfg.block_size, cfg.dim) if cfg.pos == "learned" else None
         self.drop = nn.Dropout(cfg.dropout)
         self.blocks = nn.ModuleList(Block(cfg) for _ in range(cfg.n_layers))
         self.norm = make_norm(cfg)
@@ -130,8 +161,10 @@ class GPT(nn.Module):
         """idx: (B, T) token IDs. Returns logits (B, T, vocab) and the loss if targets are given."""
         T = idx.shape[1]
         assert T <= self.cfg.block_size, f"sequence length {T} exceeds block_size"
-        pos = torch.arange(T, device=idx.device)
-        x = self.drop(self.tok_emb(idx) + self.pos_emb(pos))
+        x = self.tok_emb(idx)
+        if self.pos_emb is not None:
+            x = x + self.pos_emb(torch.arange(T, device=idx.device))
+        x = self.drop(x)
         for block in self.blocks:
             x = block(x)
         logits = self.lm_head(self.norm(x))
