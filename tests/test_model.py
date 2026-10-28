@@ -133,3 +133,29 @@ def test_swiglu_keeps_parameter_count_close_to_plain_mlp():
 def test_unknown_ff_is_rejected():
     with pytest.raises(ValueError, match="unknown ff"):
         GPT(GPTConfig(**{**CFG.to_dict(), "ff": "relu"}))
+
+
+@pytest.mark.parametrize("pos", ["learned", "rope"])
+def test_cached_steps_match_a_full_forward_pass(pos):
+    torch.manual_seed(0)
+    model = GPT(GPTConfig(**{**CFG.to_dict(), "pos": pos})).eval()
+    idx = torch.randint(0, CFG.vocab_size, (2, 12))
+    full, _ = model.step(idx)
+    logits, past = model.step(idx[:, :7])  # a prompt...
+    pieces = [logits]
+    for t in range(7, 12):  # ...then one token at a time using the cache
+        logits, past = model.step(idx[:, t : t + 1], past)
+        pieces.append(logits)
+    assert torch.allclose(torch.cat(pieces, dim=1), full, atol=1e-5)
+    assert past[0][0].shape[2] == 12  # keys now cover all 12 tokens
+
+
+@pytest.mark.parametrize("pos", ["learned", "rope"])
+def test_cached_generation_matches_uncached_even_past_block_size(pos):
+    model = GPT(GPTConfig(**{**CFG.to_dict(), "pos": pos})).eval()
+    prompt = torch.randint(0, CFG.vocab_size, (1, 3))
+    outs = []
+    for use_cache in (True, False):
+        torch.manual_seed(1)
+        outs.append(model.generate(prompt, 30, top_k=10, use_cache=use_cache))  # 33 > block_size 16
+    assert torch.equal(outs[0], outs[1])

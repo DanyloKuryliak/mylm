@@ -88,8 +88,20 @@ overfits the small dataset: validation loss starts rising while training loss ke
 
 ## 5. Generation (`GPT.generate`)
 
-Repeat: run the model on the last `block_size` tokens, take the logits for the final position,
-divide by `temperature`, keep only the `top_k` highest, sample one token from the softmax, append it.
+Repeat: run the model, take the logits for the final position, divide by `temperature`, keep only
+the `top_k` highest, sample one token from the softmax, append it.
+
+**KV cache.** In a causal model the keys and values of a token depend only on the tokens before
+it, so they never change as the text grows. Each attention layer therefore returns its keys and
+values (`GPT.step` returns them for all layers), and the next step feeds only the newest token:
+its query attends to the cached keys and values plus its own, with the causal mask offset by the
+cache length. Positions follow the same offset: the learned embedding is looked up at
+`offset .. offset + T`, and RoPE rotates by those angles. Work per step drops from the whole
+context to one token.
+
+When the text exceeds `block_size`, the model sees only the last `block_size` tokens, so every
+token's position changes and the cache no longer matches. Those steps recompute the window, which
+keeps the output identical to the uncached path (checked in the tests) but gives no speed-up.
 
 ## Default configuration
 

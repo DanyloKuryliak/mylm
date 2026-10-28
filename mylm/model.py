@@ -56,9 +56,9 @@ class Rotary(nn.Module):
         self.register_buffer("cos", angles.cos(), persistent=False)
         self.register_buffer("sin", angles.sin(), persistent=False)
 
-    def forward(self, x):
-        """x: (B, heads, T, head_dim) -> same shape, rotated."""
-        cos, sin = self.cos[: x.shape[-2]], self.sin[: x.shape[-2]]
+    def forward(self, x, offset=0):
+        """x: (B, heads, T, head_dim) -> same shape, rotated as positions offset .. offset + T."""
+        cos, sin = self.cos[offset : offset + x.shape[-2]], self.sin[offset : offset + x.shape[-2]]
         x1, x2 = x.chunk(2, dim=-1)
         return torch.cat([x1 * cos - x2 * sin, x1 * sin + x2 * cos], dim=-1)
 
@@ -87,20 +87,28 @@ class CausalSelfAttention(nn.Module):
         mask = torch.tril(torch.ones(cfg.block_size, cfg.block_size, dtype=torch.bool))
         self.register_buffer("mask", mask, persistent=False)  # True where looking is allowed
 
-    def forward(self, x):
+    def forward(self, x, past=None):
+        """x: (B, T, C) new tokens. `past` is the (keys, values) of the tokens before them, if any.
+
+        Returns the attention output and the (keys, values) covering past + new tokens.
+        """
         B, T, C = x.shape
         q, k, v = self.qkv(x).split(C, dim=-1)
         # (B, T, C) -> (B, heads, T, head_dim)
         q, k, v = (t.view(B, T, self.n_heads, self.head_dim).transpose(1, 2) for t in (q, k, v))
+        offset = 0 if past is None else past[0].shape[2]  # how many tokens came before
         if self.rotary is not None:  # position enters only here, through q and k (never v)
-            q, k = self.rotary(q), self.rotary(k)
+            q, k = self.rotary(q, offset), self.rotary(k, offset)
+        if past is not None:  # keys and values of earlier tokens never change, so reuse them
+            k, v = torch.cat([past[0], k], dim=2), torch.cat([past[1], v], dim=2)
 
-        scores = q @ k.transpose(-2, -1) / math.sqrt(self.head_dim)  # (B, heads, T, T)
-        scores = scores.masked_fill(~self.mask[:T, :T], float("-inf"))  # hide the future
+        scores = q @ k.transpose(-2, -1) / math.sqrt(self.head_dim)  # (B, heads, T, offset + T)
+        mask = self.mask[offset : offset + T, : offset + T]
+        scores = scores.masked_fill(~mask, float("-inf"))  # hide the future
         weights = self.attn_drop(F.softmax(scores, dim=-1))
 
         out = (weights @ v).transpose(1, 2).reshape(B, T, C)  # concatenate heads
-        return self.resid_drop(self.proj(out))
+        return self.resid_drop(self.proj(out)), (k, v)
 
 
 class FeedForward(nn.Module):
@@ -154,10 +162,11 @@ class Block(nn.Module):
         self.norm2 = make_norm(cfg)
         self.ff = make_ff(cfg)
 
-    def forward(self, x):
-        x = x + self.attn(self.norm1(x))
+    def forward(self, x, past=None):
+        attn_out, present = self.attn(self.norm1(x), past)
+        x = x + attn_out
         x = x + self.ff(self.norm2(x))
-        return x
+        return x, present
 
 
 class GPT(nn.Module):
@@ -186,28 +195,50 @@ class GPT(nn.Module):
     def num_parameters(self):
         return sum(p.numel() for p in self.parameters())
 
-    def forward(self, idx, targets=None):
-        """idx: (B, T) token IDs. Returns logits (B, T, vocab) and the loss if targets are given."""
+    def step(self, idx, past=None):
+        """Run the model on new tokens `idx` (B, T), given each layer's cached keys and values.
+
+        Returns logits (B, T, vocab) and the updated per-layer cache. With `past=None` this is an
+        ordinary forward pass over the whole sequence.
+        """
         T = idx.shape[1]
-        assert T <= self.cfg.block_size, f"sequence length {T} exceeds block_size"
+        offset = 0 if past is None else past[0][0].shape[2]
+        assert offset + T <= self.cfg.block_size, f"sequence length {offset + T} exceeds block_size"
         x = self.tok_emb(idx)
         if self.pos_emb is not None:
-            x = x + self.pos_emb(torch.arange(T, device=idx.device))
+            x = x + self.pos_emb(torch.arange(offset, offset + T, device=idx.device))
         x = self.drop(x)
-        for block in self.blocks:
-            x = block(x)
-        logits = self.lm_head(self.norm(x))
+        present = []
+        for i, block in enumerate(self.blocks):
+            x, kv = block(x, None if past is None else past[i])
+            present.append(kv)
+        return self.lm_head(self.norm(x)), present
+
+    def forward(self, idx, targets=None):
+        """idx: (B, T) token IDs. Returns logits (B, T, vocab) and the loss if targets are given."""
+        logits, _ = self.step(idx)
         loss = None
         if targets is not None:
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
         return logits, loss
 
     @torch.no_grad()
-    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
-        """Extend `idx` (B, T) by sampling one token at a time."""
+    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None, use_cache=True):
+        """Extend `idx` (B, T) by sampling one token at a time.
+
+        With `use_cache`, each step feeds only the newest token and reuses the keys and values of
+        earlier ones. Once the text outgrows `block_size` the window slides, every position shifts
+        and the cache is invalid, so those steps recompute the window (same output, no speed-up).
+        """
+        bs = self.cfg.block_size
+        past, cached = None, 0  # `cached` = number of tokens the cache covers
         for _ in range(max_new_tokens):
-            context = idx[:, -self.cfg.block_size :]
-            logits, _ = self(context)
+            n = idx.shape[1]
+            if use_cache and past is not None and n <= bs and cached == n - 1:
+                logits, past = self.step(idx[:, -1:], past)
+            else:
+                logits, past = self.step(idx[:, -bs:])
+            cached = min(n, bs)
             logits = logits[:, -1, :] / max(temperature, 1e-6)  # scores for the next token
             if top_k is not None:
                 kth = torch.topk(logits, min(top_k, logits.size(-1))).values[:, -1, None]

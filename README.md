@@ -83,6 +83,23 @@ But today, they are bored. They ask their mom to help them pack up and have some
 The text is grammatical and follows a story arc but still contains invented words and drifts off
 topic. Training loss (1.92) is below validation loss (2.13), so the model has begun to memorise.
 
+### Generation speed (KV cache)
+
+`mylm-generate` reuses each layer's keys and values from earlier steps instead of recomputing the
+whole context for every new token; `--no-cache` turns this off. The text is identical either way
+(tested). Measured on the 5.3M-parameter RoPE model:
+
+| Device | New tokens | No cache | Cache | Speed-up |
+| --- | ---: | ---: | ---: | ---: |
+| CPU | 100 | 0.22 s | 0.07 s | 3.0x |
+| CPU | 300 | 0.84 s | 0.64 s | 1.3x |
+| Apple MPS | 100 | 0.48 s | 0.79 s | 0.6x |
+| Apple MPS | 300 | 0.86 s | 0.90 s | 1.0x |
+
+The cache only helps while the text fits in the 128-token context window; after that the window
+slides, positions shift and the cache is rebuilt at every step. On the GPU this model is too small
+for the saved arithmetic to outweigh the per-step overhead of extending the cache.
+
 ## How it works
 
 ```
