@@ -104,8 +104,6 @@ def main():
         print(f"downloading {args.url}")
         download(args.url, raw, args.max_mb * 1_000_000 if args.max_mb else None)
     records = parse_records(raw.read_text(encoding="utf-8", errors="ignore"))
-    if args.max_mb:
-        records = records[:-1]  # the byte range cut the last record off mid-story
     train_records, val_records = split_records(records)
     train = build_examples(train_records, tokenizer, block_size)
     val = build_examples(val_records, tokenizer, block_size)[: args.eval_examples]

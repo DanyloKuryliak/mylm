@@ -93,3 +93,10 @@ def test_respond_returns_text_and_whether_the_story_finished():
     model = GPT(cfg).eval()
     story, finished = respond(model, tokenizer, {"Words": "cat"}, max_new_tokens=5, device="cpu")
     assert isinstance(story, str) and finished is False  # an untrained model never writes END
+
+
+def test_an_entry_cut_off_before_its_end_marker_is_skipped():
+    complete = f"Summary: S\nStory:\nIt ended.\n{END}\n"
+    cut_off = "Summary: T\nStory:\nIt was cut off in the mi"
+    assert [r.story for r in parse_records(complete + cut_off)] == ["It ended."]
+    assert [r.story for r in parse_records(complete)] == ["It ended."]

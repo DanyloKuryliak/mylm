@@ -36,9 +36,14 @@ def parse_records(text):
     """TinyStories-Instruct text -> list of Record. Entries without a story are skipped.
 
     Field order varies between entries and a field such as the summary may come after the story.
+    A final entry that is not closed by the end marker was cut off (for instance by a partial
+    download) and is skipped.
     """
+    chunks = text.split(END)
+    if chunks[-1].strip():
+        chunks.pop()
     records = []
-    for chunk in text.split(END):
+    for chunk in chunks:
         sections = parse_fields(chunk)
         story = sections.pop("Story", "")
         if story:
