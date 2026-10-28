@@ -243,12 +243,14 @@ class GPT(nn.Module):
         return logits, loss
 
     @torch.no_grad()
-    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None, use_cache=True):
+    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None, use_cache=True, stop=None):
         """Extend `idx` (B, T) by sampling one token at a time.
 
         With `use_cache`, each step feeds only the newest token and reuses the keys and values of
         earlier ones. Once the text outgrows `block_size` the window slides, every position shifts
         and the cache is invalid, so those steps recompute the window (same output, no speed-up).
+        `stop`, if given, is called with the sequence after every new token; generation ends early
+        when it returns True.
         """
         bs = self.cfg.block_size
         past, cached = None, 0  # `cached` = number of tokens the cache covers
@@ -265,4 +267,6 @@ class GPT(nn.Module):
                 logits = logits.masked_fill(logits < kth, float("-inf"))
             next_id = torch.multinomial(F.softmax(logits, dim=-1), num_samples=1)
             idx = torch.cat([idx, next_id], dim=1)
+            if stop is not None and stop(idx):
+                break
         return idx

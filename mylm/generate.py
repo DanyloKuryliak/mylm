@@ -4,8 +4,7 @@ import argparse
 
 import torch
 
-from mylm.model import GPT, GPTConfig
-from mylm.tokenizer import BPETokenizer
+from mylm.checkpoint import load_model
 from mylm.train import pick_device
 
 
@@ -24,11 +23,7 @@ def main():
     if args.seed is not None:
         torch.manual_seed(args.seed)
     device = args.device or pick_device()
-    ckpt = torch.load(args.checkpoint, map_location=device)
-    model = GPT(GPTConfig(**ckpt["config"])).to(device)
-    model.load_state_dict(ckpt["model"])
-    model.eval()
-    tokenizer = BPETokenizer.from_merge_list(ckpt["tokenizer_merges"])
+    model, tokenizer = load_model(args.checkpoint, device)
 
     idx = torch.tensor([tokenizer.encode(args.prompt)], dtype=torch.long, device=device)
     out = model.generate(

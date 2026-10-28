@@ -18,6 +18,9 @@ dev = ["pytest>=8", "ruff>=0.6"]
 mylm-prepare = "mylm.prepare:main"
 mylm-train = "mylm.train:main"
 mylm-generate = "mylm.generate:main"
+mylm-sft = "mylm.sft:main"
+mylm-chat = "mylm.chat:main"
+mylm-eval = "mylm.evaluate:main"
 
 [tool.setuptools.packages.find]
 include = ["mylm*"]
