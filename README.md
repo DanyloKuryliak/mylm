@@ -22,6 +22,17 @@ mylm-generate --prompt "ROMEO:"           # sample text from the trained model
 `mylm-train` selects CUDA, Apple MPS or CPU automatically (override with `--device`). All options:
 `mylm-train --help`.
 
+### TinyStories
+
+[TinyStories](https://arxiv.org/abs/2305.07759) is a corpus of simple, LLM-written children's
+stories designed for small models. It gives much more coherent output than Shakespeare:
+
+```bash
+mylm-prepare --dataset tinystories        # ~19 MB, 2048-token vocabulary, writes data/tinystories/
+mylm-train --data-dir data/tinystories --out checkpoints/tinystories.pt \
+           --dim 256 --layers 6 --heads 8 --dropout 0.1
+```
+
 ## Results
 
 Default settings, 6000 steps, batch 32 x 128 tokens, Apple Silicon (MPS):
@@ -45,6 +56,29 @@ Marry, sir, I say you, must stay, come.
 
 The model learns the format of a play and plausible English phrasing. It does not produce
 coherent sentences; that is expected for under 1M parameters and 0.5M training tokens.
+
+### TinyStories
+
+6000 steps, batch 32 x 128 tokens, 4.7M training tokens, vocabulary 2048:
+
+| Model | Parameters | Training time | Validation loss | Loss per character |
+| --- | ---: | ---: | ---: | ---: |
+| Shakespeare, default (vocab 512) | 873k | ~2 min | 2.904 | 1.487 |
+| TinyStories, `--dim 128 --layers 4` | 1.07M | ~2 min | 2.618 | 0.715 |
+| TinyStories, `--dim 256 --layers 6` | 5.29M | ~6 min | **2.129** | 0.582 |
+
+Loss is measured per token, and different tokenizers produce different numbers of characters per
+token (1.95 for Shakespeare, 3.66 for TinyStories), so per-token losses are only comparable when
+the dataset and tokenizer are the same. Dividing by characters per token gives the last column,
+which is comparable across datasets. Sample from the largest model:
+
+```
+Anna and Ben are friends who are twins. They like to play with their toy cars and puzzle.
+But today, they are bored. They ask their mom to help them pack up and have some fun.
+```
+
+The text is grammatical and follows a story arc but still contains invented words and drifts off
+topic. Training loss (1.92) is below validation loss (2.13), so the model has begun to memorise.
 
 ## How it works
 
@@ -78,8 +112,9 @@ overfit a single batch, and generation.
 
 ## Data and references
 
-- Dataset: Tiny Shakespeare (about 1.1 MB), from Andrej Karpathy's
-  [char-rnn](https://github.com/karpathy/char-rnn) repository.
+- Datasets: Tiny Shakespeare (about 1.1 MB), from Andrej Karpathy's
+  [char-rnn](https://github.com/karpathy/char-rnn) repository; TinyStories (Eldan and Li, 2023),
+  validation split, from [Hugging Face](https://huggingface.co/datasets/roneneldan/TinyStories).
 - Vaswani et al., [Attention Is All You Need](https://arxiv.org/abs/1706.03762), 2017.
 - Radford et al., *Language Models are Unsupervised Multitask Learners* (GPT-2), 2019.
 - Sennrich et al., [Neural Machine Translation of Rare Words with Subword Units](https://arxiv.org/abs/1508.07909), 2016 (BPE).

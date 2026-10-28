@@ -22,6 +22,17 @@ sliding windows over the stream: for a window `x` of `block_size` tokens, the ta
 window shifted one token to the right. At every position the model predicts the next token, so a
 window yields `block_size` training signals and the text supplies its own labels.
 
+### Choosing a dataset and vocabulary size
+
+`mylm-prepare --dataset` selects the corpus; each has its own default vocabulary size.
+Vocabulary size trades sequence length against embedding size: a larger vocabulary packs more
+characters into each token (1.95 characters per token at 512, 3.66 at 2048 on TinyStories), so the
+same context window covers more text, but the embedding and output matrices grow with it.
+
+Loss is averaged per token, so it depends on the tokenizer. To compare runs with different
+tokenizers or datasets, divide the loss by the average characters per token. Within one dataset and
+tokenizer, per-token loss is directly comparable, which is how architecture changes are evaluated.
+
 ## 3. Model (`mylm/model.py`)
 
 Input of shape `(batch, time)` of token IDs becomes logits of shape `(batch, time, vocab)`.
