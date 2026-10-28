@@ -2,15 +2,15 @@ import sys
 
 import torch
 
-from mylm.prepare import DATASETS, main
+from mylm.prepare import DATASETS, encode_in_blocks, main
 from mylm.tokenizer import BPETokenizer
 
 
 def test_dataset_registry_is_well_formed():
     assert {"shakespeare", "tinystories"} <= set(DATASETS)
-    for url, vocab_size in DATASETS.values():
-        assert url.startswith("https://")
-        assert vocab_size > 256  # must leave room for merges beyond the 256 byte tokens
+    for dataset in DATASETS.values():
+        assert dataset.url.startswith("https://")
+        assert dataset.vocab_size > 256  # must leave room for merges beyond the 256 byte tokens
 
 
 def test_prepare_writes_splits_and_tokenizer(tmp_path, monkeypatch):
@@ -25,3 +25,12 @@ def test_prepare_writes_splits_and_tokenizer(tmp_path, monkeypatch):
     assert 256 < tokenizer.vocab_size <= 300  # may stop early once no pairs are left to merge
     assert len(train) > len(val) > 0
     assert tokenizer.decode(train.tolist()) + tokenizer.decode(val.tolist()) == text
+
+
+def test_encoding_in_blocks_round_trips_and_matches_whole_text_encoding():
+    text = "".join(f"Story {i}: the cat sat.\nThe dog ran home.\n" for i in range(60))
+    tokenizer = BPETokenizer()
+    tokenizer.train(text, 290)
+    blocks = encode_in_blocks(tokenizer, text, block_chars=100)
+    assert tokenizer.decode(blocks.tolist()) == text
+    assert torch.equal(blocks, torch.tensor(tokenizer.encode(text)))  # cuts at newlines are exact
