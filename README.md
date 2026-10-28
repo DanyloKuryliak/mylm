@@ -66,6 +66,7 @@ coherent sentences; that is expected for under 1M parameters and 0.5M training t
 | Shakespeare, default (vocab 512) | 873k | ~2 min | 2.904 | 1.487 |
 | TinyStories, `--dim 128 --layers 4` | 1.07M | ~2 min | 2.618 | 0.715 |
 | TinyStories, `--dim 256 --layers 6` | 5.29M | ~6 min | **2.129** | 0.582 |
+| same, `--norm rmsnorm` | 5.29M | ~6.7 min | 2.131 | 0.582 |
 
 Loss is measured per token, and different tokenizers produce different numbers of characters per
 token (1.95 for Shakespeare, 3.66 for TinyStories), so per-token losses are only comparable when

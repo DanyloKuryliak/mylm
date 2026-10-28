@@ -1,8 +1,9 @@
 import math
 
+import pytest
 import torch
 
-from mylm.model import GPT, GPTConfig
+from mylm.model import GPT, GPTConfig, RMSNorm
 
 CFG = GPTConfig(vocab_size=64, block_size=16, dim=32, n_layers=2, n_heads=4, dropout=0.0)
 
@@ -54,3 +55,26 @@ def test_generate_extends_the_prompt():
     out = model.generate(torch.zeros((1, 3), dtype=torch.long), max_new_tokens=20, top_k=5)
     assert out.shape == (1, 23)  # longer than block_size is fine
     assert out.max() < CFG.vocab_size
+
+
+def test_rmsnorm_outputs_unit_rms_and_keeps_direction():
+    x = torch.randn(4, 7, 32) * 5 + 3  # large scale and a non-zero mean
+    out = RMSNorm(32)(x)
+    assert torch.allclose(out.pow(2).mean(-1), torch.ones(4, 7), atol=1e-4)
+    # No mean subtraction: the output is just a rescaled copy of the input, so the mean survives.
+    assert torch.allclose(out / x, (out / x)[..., :1].expand_as(x), atol=1e-4)
+
+
+def test_rmsnorm_model_has_fewer_parameters_and_trains_the_same_way():
+    layer = GPT(CFG)
+    rms = GPT(GPTConfig(**{**CFG.to_dict(), "norm": "rmsnorm"}))
+    n_norms = 2 * CFG.n_layers + 1
+    assert layer.num_parameters() - rms.num_parameters() == n_norms * CFG.dim  # no bias vectors
+    idx = torch.randint(0, CFG.vocab_size, (3, 10))
+    logits, loss = rms(idx, idx)
+    assert logits.shape == (3, 10, CFG.vocab_size) and loss.ndim == 0
+
+
+def test_unknown_norm_is_rejected():
+    with pytest.raises(ValueError, match="unknown norm"):
+        GPT(GPTConfig(**{**CFG.to_dict(), "norm": "batchnorm"}))

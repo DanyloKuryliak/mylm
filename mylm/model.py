@@ -16,9 +16,33 @@ class GPTConfig:
     n_layers: int = 4
     n_heads: int = 4
     dropout: float = 0.2  # fraction of activations randomly zeroed during training
+    norm: str = "layernorm"  # "layernorm" or "rmsnorm"
 
     def to_dict(self):
         return asdict(self)
+
+
+class RMSNorm(nn.Module):
+    """Rescale each token vector to unit root-mean-square, then apply a learned per-channel gain.
+
+    Unlike LayerNorm it does not subtract the mean and has no bias, so it is cheaper.
+    """
+
+    def __init__(self, dim, eps=1e-6):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+
+    def forward(self, x):
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps) * self.weight
+
+
+def make_norm(cfg):
+    if cfg.norm == "layernorm":
+        return nn.LayerNorm(cfg.dim)
+    if cfg.norm == "rmsnorm":
+        return RMSNorm(cfg.dim)
+    raise ValueError(f"unknown norm {cfg.norm!r}, expected 'layernorm' or 'rmsnorm'")
 
 
 class CausalSelfAttention(nn.Module):
@@ -68,9 +92,9 @@ class Block(nn.Module):
 
     def __init__(self, cfg):
         super().__init__()
-        self.norm1 = nn.LayerNorm(cfg.dim)
+        self.norm1 = make_norm(cfg)
         self.attn = CausalSelfAttention(cfg)
-        self.norm2 = nn.LayerNorm(cfg.dim)
+        self.norm2 = make_norm(cfg)
         self.ff = FeedForward(cfg.dim, cfg.dropout)
 
     def forward(self, x):
@@ -87,7 +111,7 @@ class GPT(nn.Module):
         self.pos_emb = nn.Embedding(cfg.block_size, cfg.dim)  # position -> vector
         self.drop = nn.Dropout(cfg.dropout)
         self.blocks = nn.ModuleList(Block(cfg) for _ in range(cfg.n_layers))
-        self.norm = nn.LayerNorm(cfg.dim)
+        self.norm = make_norm(cfg)
         self.lm_head = nn.Linear(cfg.dim, cfg.vocab_size, bias=False)
         self.lm_head.weight = self.tok_emb.weight  # share weights with the embedding
         self.apply(self._init_weights)

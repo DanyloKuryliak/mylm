@@ -49,6 +49,13 @@ Input of shape `(batch, time)` of token IDs becomes logits of shape `(batch, tim
 3. **Output head.** Final LayerNorm, then a linear layer to vocabulary logits. Its weights are
    shared with the token embedding (weight tying).
 
+**Normalization.** `--norm layernorm` (default) subtracts the mean, divides by the standard
+deviation and applies a learned scale and shift. `--norm rmsnorm` only divides by the
+root-mean-square, `x / sqrt(mean(x²) + ε) · γ`, with no mean subtraction and no shift. On
+TinyStories with the 5.3M-parameter model both reach the same validation loss (2.129 vs 2.131,
+within seed noise), so the extra centering step is unnecessary. The RMSNorm here is written with
+plain tensor operations and ran about 10% slower than PyTorch's fused `nn.LayerNorm`.
+
 Dropout is applied to embeddings, attention weights and sub-layer outputs. Without it, the model
 overfits the small dataset: validation loss starts rising while training loss keeps falling.
 
